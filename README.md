@@ -236,7 +236,6 @@ python seed_demo.py
 
 ## Demo
 
-See [DEMO.md](DEMO.md) for the full 3-minute hackathon demo walkthrough.
 
 **Demo credentials (pre-seeded with 10 realistic documents):**
 
@@ -245,7 +244,7 @@ Email:    demo@docvault.app
 Password: DocVault2026!
 ```
 
-**Live URL:** `http://<FrontendBucketName>.s3-website-us-east-1.amazonaws.com`
+**Live URL:** `http://docvault-frontend-755329540298-dev.s3-website-us-east-1.amazonaws.com/dashboard`
 
 ---
 
@@ -262,7 +261,7 @@ Designed for minimal cost on AWS serverless pay-per-use pricing.
 | Cognito | Free (< 50k MAU) |
 | Bedrock Nova Pro | ~$0.003 per document analyzed |
 
-**Total for a hackathon demo session: < $0.10**
+**Total for a demo: < $0.10**
 
 ---
 
