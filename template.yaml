@@ -1,0 +1,456 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: DocVault - Secure Document Vault Application
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [prod, staging, dev]
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        DOCUMENTS_TABLE: !Ref DocumentsTable
+        SHARES_TABLE: !Ref SharesTable
+        AUDIT_TABLE: !Ref AuditTable
+        BUCKET_NAME: !Ref DocumentsBucket
+        BEDROCK_MODEL_ID: us.amazon.nova-pro-v1:0
+        ENVIRONMENT: !Ref Environment
+        USER_POOL_ID: !Ref UserPool
+
+Resources:
+
+  # ─── Cognito ───────────────────────────────────────────────────────────────
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub docvault-users-${Environment}
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      UserPoolTags:
+        Project: DocVault
+        Environment: !Ref Environment
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub docvault-client-${Environment}
+      UserPoolId: !Ref UserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # ─── S3 ────────────────────────────────────────────────────────────────────
+  # Note: S3 event notifications are configured via CLI post-deploy to avoid
+  # circular dependency with Lambda resources.
+
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub docvault-docs-${AWS::AccountId}-${Environment}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            ExposedHeaders:
+              - ETag
+              - x-amz-request-id
+            MaxAge: 3000
+      Tags:
+        - Key: Project
+          Value: DocVault
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ─── DynamoDB Tables ───────────────────────────────────────────────────────
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub docvault-documents-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: documentType
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: documentId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: type-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: documentType
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: status-index
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: DocVault
+
+  SharesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub docvault-shares-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shareId
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shareId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: owner-index
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: DocVault
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub docvault-audit-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: timestampEventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: timestampEventId
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: DocVault
+
+  # ─── IAM Role ──────────────────────────────────────────────────────────────
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub docvault-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DocVaultLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDBAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt DocumentsTable.Arn
+                  - !Sub ${DocumentsTable.Arn}/index/*
+                  - !GetAtt SharesTable.Arn
+                  - !Sub ${SharesTable.Arn}/index/*
+                  - !GetAtt AuditTable.Arn
+                  - !Sub ${AuditTable.Arn}/index/*
+              - Sid: S3Access
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:HeadObject
+                Resource:
+                  - !Sub arn:aws:s3:::${DocumentsBucket}/*
+              - Sid: S3ListAccess
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${DocumentsBucket}
+              - Sid: BedrockAccess
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-pro-v1:0
+                  - arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0
+                  - arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-pro-v1:0
+                  - arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-pro-v1:0
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/DocVault*:*
+
+  # ─── Lambda Functions ──────────────────────────────────────────────────────
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub DocVaultApi-${Environment}
+      Handler: api.handler
+      CodeUri: backend/
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Events:
+        ApiProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocVaultApi
+            Path: /{proxy+}
+            Method: ANY
+        ApiRoot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref DocVaultApi
+            Path: /
+            Method: ANY
+
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub DocVaultProcessor-${Environment}
+      Handler: processor.handler
+      CodeUri: backend/
+      MemorySize: 1024
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  S3InvokeProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ProcessorFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${DocumentsBucket}
+      SourceAccount: !Ref AWS::AccountId
+
+  # ─── API Gateway ───────────────────────────────────────────────────────────
+
+  DocVaultApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub DocVaultApi-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,PATCH,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+        MaxAge: "'86400'"
+      GatewayResponses:
+        UNAUTHORIZED:
+          StatusCode: 401
+          ResponseTemplates:
+            application/json: '{"error": "Unauthorized"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+        ACCESS_DENIED:
+          StatusCode: 403
+          ResponseTemplates:
+            application/json: '{"error": "Forbidden"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+
+  # ─── CloudWatch Log Groups ─────────────────────────────────────────────────
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/DocVaultApi-${Environment}
+      RetentionInDays: 30
+
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/DocVaultProcessor-${Environment}
+      RetentionInDays: 30
+
+  # ─── Frontend Bucket ───────────────────────────────────────────────────────
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub docvault-frontend-${AWS::AccountId}-${Environment}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      Tags:
+        - Key: Project
+          Value: DocVault
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${FrontendBucket}/*
+
+# ─── Outputs ─────────────────────────────────────────────────────────────────
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${DocVaultApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiUrl
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolId
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolClientId
+
+  BucketName:
+    Description: S3 Documents Bucket Name
+    Value: !Ref DocumentsBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-BucketName
+
+  ProcessorFunctionArn:
+    Description: Processor Lambda ARN (for S3 notification wiring)
+    Value: !GetAtt ProcessorFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ProcessorArn
+
+  FrontendBucketName:
+    Description: S3 Frontend Bucket Name
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-FrontendBucket
+
+  FrontendUrl:
+    Description: Frontend Website URL
+    Value: !Sub http://${FrontendBucket}.s3-website-${AWS::Region}.amazonaws.com
+    Export:
+      Name: !Sub ${AWS::StackName}-FrontendUrl

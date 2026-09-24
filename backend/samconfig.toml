@@ -1,0 +1,14 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "docvault"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+resolve_s3 = true
+s3_prefix = "docvault"
+parameter_overrides = "Environment=dev"
+
+[default.build.parameters]
+use_container = false
+

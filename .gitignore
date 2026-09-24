@@ -1,0 +1,40 @@
+# ─── AWS SAM build artifacts ──────────────────────────────────────────────────
+.aws-sam/
+samconfig.toml.bak
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.zip
+
+# ─── Node / Frontend ──────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+
+# ─── Environment / Secrets ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Test / Temp ──────────────────────────────────────────────────────────────
+*.log
+test_event.json
+bedrock-test.json
+*.tmp
